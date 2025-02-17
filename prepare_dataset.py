@@ -16,7 +16,7 @@ logger.info(f"Using device: {DEVICE}")
 os.makedirs("data_output", exist_ok=True)
 
 # Initialize Ray with GPU support
-ray.init(runtime_env={"pip": ["torch"]})
+ray.init()
 
 # 1. Load a pretrained Sentence Transformer model
 EMBEDDING_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
