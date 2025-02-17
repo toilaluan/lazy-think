@@ -58,7 +58,7 @@ def compute_embeddings_batch(texts, model, batch_size=32):
             embeddings.append(batch_embeddings.cpu().numpy())
     return np.vstack(embeddings)
 
-@ray.remote()  # Adjust GPU fraction based on your needs
+@ray.remote
 def compute_similarity_chunk(prompts_emb_chunk, thinks_emb, chunk_start, chunk_size):
     """
     Compute similarity matrix for a chunk of prompts using GPU
