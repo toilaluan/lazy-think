@@ -4,7 +4,6 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
-import ray
 from loguru import logger
 from tqdm import tqdm
 
@@ -14,9 +13,6 @@ logger.info(f"Using device: {DEVICE}")
 
 # Create output directory
 os.makedirs("data_output", exist_ok=True)
-
-# Initialize Ray with GPU support
-ray.init()
 
 # 1. Load a pretrained Sentence Transformer model
 EMBEDDING_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
@@ -58,10 +54,9 @@ def compute_embeddings_batch(texts, model, batch_size=32):
             embeddings.append(batch_embeddings.cpu().numpy())
     return np.vstack(embeddings)
 
-@ray.remote
 def compute_similarity_chunk(prompts_emb_chunk, thinks_emb, chunk_start, chunk_size):
     """
-    Compute similarity matrix for a chunk of prompts using GPU
+    Compute similarity matrix for a chunk of prompts
     """
     device = "cpu"
     
@@ -94,35 +89,22 @@ logger.info("Computing embeddings...")
 THINKS_EMBEDDINGS = compute_embeddings_batch(THINKS, EMBEDDING_MODEL)
 PROMPTS_EMBEDDINGS = compute_embeddings_batch(PROMPTS, EMBEDDING_MODEL)
 
-# Distribute similarity matrix computation using Ray
-logger.info("Computing distributed similarity matrix...")
+# Compute similarity matrix sequentially
+logger.info("Computing similarity matrix...")
 CHUNK_SIZE = 100  # Adjust based on GPU memory
-num_chunks = (len(PROMPTS_EMBEDDINGS) + CHUNK_SIZE - 1) // CHUNK_SIZE
-
-# Launch distributed similarity computation tasks
-similarity_tasks = []
-for i in range(num_chunks):
-    start_idx = i * CHUNK_SIZE
-    end_idx = min(start_idx + CHUNK_SIZE, len(PROMPTS_EMBEDDINGS))
-    chunk = PROMPTS_EMBEDDINGS[start_idx:end_idx]
+similarity_matrix = np.zeros((len(PROMPTS_EMBEDDINGS), len(THINKS_EMBEDDINGS)))
+for i in tqdm(range(0, len(PROMPTS_EMBEDDINGS), CHUNK_SIZE), desc="Computing similarity chunks"):
+    end_idx = min(i + CHUNK_SIZE, len(PROMPTS_EMBEDDINGS))
+    chunk = PROMPTS_EMBEDDINGS[i:end_idx]
     
-    task = compute_similarity_chunk.remote(
+    chunk_start, chunk_sims = compute_similarity_chunk(
         chunk,
         THINKS_EMBEDDINGS,
-        start_idx,
+        i,
         CHUNK_SIZE
     )
-    similarity_tasks.append(task)
+    similarity_matrix[i:end_idx] = chunk_sims
 
-# Collect and combine similarity matrix chunks
-logger.info("Collecting similarity matrix chunks...")
-similarity_matrix = np.zeros((len(PROMPTS_EMBEDDINGS), len(THINKS_EMBEDDINGS)))
-for _ in tqdm(range(len(similarity_tasks)), desc="Processing similarity chunks"):
-    chunk_start, chunk_sims = ray.get(similarity_tasks.pop(0))
-    chunk_end = min(chunk_start + CHUNK_SIZE, len(PROMPTS_EMBEDDINGS))
-    similarity_matrix[chunk_start:chunk_end] = chunk_sims
-
-@ray.remote
 def process_prompt_chunk(chunk_start, chunk_size, similarity_matrix, prompts, thinks, sim_tags):
     """
     Process a chunk of prompts using pre-computed similarity matrix
@@ -145,24 +127,18 @@ def process_prompt_chunk(chunk_start, chunk_size, similarity_matrix, prompts, th
     
     return chunk_results
 
-# Process prompts in parallel using chunks
-logger.info("Processing prompts in parallel...")
-processing_tasks = [
-    process_prompt_chunk.remote(
-        i * CHUNK_SIZE,
+# Process prompts sequentially in chunks
+logger.info("Processing prompts...")
+prepared_ds = []
+for i in tqdm(range(0, len(PROMPTS), CHUNK_SIZE), desc="Processing chunks"):
+    chunk_result = process_prompt_chunk(
+        i,
         CHUNK_SIZE,
         similarity_matrix,
         PROMPTS,
         THINKS,
         SIM_TAGS
     )
-    for i in range(num_chunks)
-]
-
-# Collect results
-logger.info("Collecting results...")
-prepared_ds = []
-for chunk_result in tqdm(ray.get(processing_tasks), total=len(processing_tasks), desc="Processing chunks"):
     prepared_ds.extend(chunk_result)
 
 # Save the prepared dataset
@@ -172,6 +148,5 @@ with open(os.path.join("data_output", "prepared_ds.json"), "w") as f:
 
 logger.success("Dataset preparation completed!")
 
-# Cleanup
-ray.shutdown()
+# Remove ray cleanup
 torch.cuda.empty_cache()
